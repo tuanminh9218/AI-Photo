@@ -52,6 +52,8 @@ export default function App() {
   const [focusedType, setFocusedType] = useState<string>("shirt");
   const [activeStyle, setActiveStyle] = useState<string>("solid");
   const [activeBg, setActiveBg] = useState<string>("white");
+  const [lightingIntensity, setLightingIntensity] = useState<number>(75);
+  const [lightingDirection, setLightingDirection] = useState<string>("front");
   const [gender, setGender] = useState<"Nam" | "Nữ">("Nam");
   const [history, setHistory] = useState<{ id: string; timestamp: number; crops: CropResult[] }[]>([]);
   const [activeSidebarTab, setActiveSidebarTab] = useState<"setup" | "outfit">("setup");
@@ -122,6 +124,13 @@ export default function App() {
     { id: "blue", label: "Xanh Azure", desc: "solid Azure blue background", class: "bg-blue-600" },
     { id: "white", label: "Trắng", desc: "solid plain white background", class: "bg-white" },
     { id: "grey", label: "Xám nhạt", desc: "solid light gray professional background", class: "bg-gray-200" },
+  ];
+
+  const LIGHTING_DIRECTIONS = [
+    { id: "front", label: "Trực diện", prompt: "balanced front studio lighting" },
+    { id: "left", label: "Bên trái", prompt: "rim lighting from the left side" },
+    { id: "right", label: "Bên phải", prompt: "rim lighting from the right side" },
+    { id: "top", label: "Từ trên", prompt: "overhead butterfly lighting" },
   ];
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -240,13 +249,28 @@ export default function App() {
     };
   }, [previewImage]);
 
-  const updatePrompt = (typeIds: string[], styleId: string, bgId: string, configsMap: Record<string, { h: number; s: number }>, currentGender?: "Nam" | "Nữ") => {
+  const updatePrompt = (
+    typeIds: string[], 
+    styleId: string, 
+    bgId: string, 
+    configsMap: Record<string, { h: number; s: number }>, 
+    currentGender?: "Nam" | "Nữ",
+    lintensity?: number,
+    ldirection?: string
+  ) => {
     setActiveTypes(typeIds);
     setActiveStyle(styleId);
     setActiveBg(bgId);
     setTypeConfigs(configsMap);
+    
     const g = currentGender || gender;
     if (currentGender) setGender(currentGender);
+    
+    const li = lintensity !== undefined ? lintensity : lightingIntensity;
+    const ld = ldirection !== undefined ? ldirection : lightingDirection;
+    
+    setLightingIntensity(li);
+    setLightingDirection(ld);
     
     // Nhãn Tiếng Việt cho các lựa chọn
     const typeLabels: Record<string, string> = {
@@ -283,19 +307,26 @@ export default function App() {
     const styleLabel = styleLabels[styleId] || "không có họa tiết";
     const bgLabel = bgLabels[bgId] || "trắng sạch";
 
-    let basePrompt = `[SYSTEM INSTRUCTION] This is a professional ID photo replacement task. You must keep the face of the person in the attached image EXACTLY the same. Change ONLY the clothes and the background according to the requirements below.
+    // Lighting details
+    const lightingOpt = LIGHTING_DIRECTIONS.find(l => l.id === ld) || LIGHTING_DIRECTIONS[0];
+    const intensityDesc = li > 85 ? "very bright professional" : li < 35 ? "soft subtle" : "balanced";
+    const lightingDesc = `${intensityDesc} ${lightingOpt.prompt}`;
+
+    let basePrompt = `[SYSTEM INSTRUCTION] This is a professional ID photo replacement task. You must keep the face of the person in the attached image EXACTLY the same. Change ONLY the clothes, the background, and the lighting according to the requirements below.
 
 [REQUIREMENTS]
 1. FACE: Keep 100% of the person's identity, facial structures, eyes, nose, mouth, skin tone, and hair from the reference image.
 2. CLOTHING: Replace current clothes with: ${clothingDesc}, ${styleLabel}. The attire should be professional for a job ID.
 3. BACKGROUND: Replace current background with: ${bgLabel} (plain, solid color, no gradients, no shadows).
-4. STYLE: Professional passport-style headshot, studio lighting, sharp focus, neutral expression.
+4. LIGHTING: Use ${lightingDesc}.
+5. STYLE: Professional passport-style headshot, sharp focus, neutral expression.
 
 [PROMPT]
 Tạo một ảnh thẻ chân thực dựa trên người trong ảnh tham chiếu. 
 Giữ nguyên khuôn mặt và đặc điểm nhận dạng. 
 Trang phục: ${clothingDesc}, ${styleLabel}, lịch sự. 
-Phông nền: ${bgLabel}, trơn.`;
+Phông nền: ${bgLabel}, trơn.
+Ánh sáng: studio, ${lightingOpt.label.toLowerCase()}, cường độ ${li}%.`;
 
     setPrompt(basePrompt);
   };
@@ -557,6 +588,8 @@ Phông nền: ${bgLabel}, trơn.`;
     setGender("Nam");
     setPrompt("");
     setActiveBg("white");
+    setLightingIntensity(75);
+    setLightingDirection("front");
     setResultImage(null);
     setCrops([]);
     setOriginalCrops([]);
@@ -855,6 +888,47 @@ Phông nền: ${bgLabel}, trơn.`;
                           <span className="truncate">{b.label}</span>
                         </button>
                       ))}
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-2">
+                    <span className="text-[10px] font-bold text-slate-600 uppercase">Hướng sáng (Lighting):</span>
+                    <div className="grid grid-cols-4 gap-2">
+                      {LIGHTING_DIRECTIONS.map(l => (
+                        <button
+                          key={l.id}
+                          onClick={() => updatePrompt(activeTypes, activeStyle, activeBg, typeConfigs, gender, lightingIntensity, l.id)}
+                          disabled={step === "upload" || isLoading}
+                          className={`px-1 py-1.5 text-[9px] font-bold uppercase rounded-lg border transition-all truncate text-center ${lightingDirection === l.id ? 'bg-amber-400 text-slate-950 border-amber-400 shadow-lg shadow-amber-400/10' : 'bg-slate-950 text-slate-400 border-slate-800 hover:border-slate-600'}`}
+                        >
+                          {l.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="flex flex-col gap-1.5">
+                    <span className="text-[10px] font-bold text-slate-600 uppercase flex justify-between">
+                      Cường độ ánh sáng: 
+                      <span className="text-amber-400">{lightingIntensity}%</span>
+                    </span>
+                    <div className="relative h-6 flex items-center group">
+                      <input 
+                        type="range"
+                        min="20"
+                        max="100"
+                        value={lightingIntensity}
+                        onChange={(e) => {
+                          const val = parseInt(e.target.value);
+                          updatePrompt(activeTypes, activeStyle, activeBg, typeConfigs, gender, val, lightingDirection);
+                        }}
+                        disabled={step === "upload" || isLoading}
+                        className="w-full h-3 rounded-full appearance-none cursor-pointer outline-none transition-opacity disabled:opacity-30"
+                        style={{
+                          background: `linear-gradient(to right, #1e293b, #fbbf24)`
+                        }}
+                      />
+                      <div className="absolute inset-0 pointer-events-none rounded-full border border-slate-800 ring-2 ring-slate-950" />
                     </div>
                   </div>
                 </div>
