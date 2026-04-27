@@ -1,0 +1,22 @@
+{
+  "entities": {
+    "user_usage": {
+      "title": "User Usage",
+      "description": "Tracks generation attempts and last successful generation for users",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "User ID" },
+        "email": { "type": "string", "description": "User email" },
+        "lastGenerationAt": { "type": "string", "format": "date-time", "description": "Timestamp of last generation" },
+        "totalGenerations": { "type": "integer", "description": "Total generations performed" }
+      },
+      "required": ["uid", "email"]
+    }
+  },
+  "firestore": {
+    "/user_usage/{userId}": {
+      "schema": "user_usage",
+      "description": "Stores usage limits and activity for a user"
+    }
+  }
+}

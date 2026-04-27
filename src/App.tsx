@@ -14,11 +14,18 @@ import {
   Loader2, 
   Camera, 
   Image as ImageIcon,
-  User,
-  Sparkles
+  User as UserIcon,
+  Sparkles,
+  Settings,
+  Key,
+  ShieldCheck,
+  Zap
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
-import { detectGenderAndGetPrompt, generateIdPhoto } from "./lib/gemini";
+import { generateIdPhoto, testApiKey } from "./lib/gemini";
+import { auth, googleProvider, signInWithPopup, signOut, onAuthStateChanged, db } from "./lib/firebase";
+import type { User } from "./lib/firebase";
+import { doc, getDoc, setDoc, updateDoc, serverTimestamp, increment } from "firebase/firestore";
 
 type Step = "upload" | "review-prompt" | "generating" | "result";
 
@@ -41,33 +48,58 @@ export default function App() {
   const [selectedModel, setSelectedModel] = useState<string>("gemini-2.5-flash-image");
   const [previewImage, setPreviewImage] = useState<CropResult | null>(null);
   const [activeTypes, setActiveTypes] = useState<string[]>(["shirt"]);
+  const [typeConfigs, setTypeConfigs] = useState<Record<string, { h: number; s: number }>>({ shirt: { h: 195, s: 70 } });
+  const [focusedType, setFocusedType] = useState<string>("shirt");
   const [activeStyle, setActiveStyle] = useState<string>("solid");
-  const [activeBg, setActiveBg] = useState<string>("blue");
-  const [clothingHue, setClothingHue] = useState<number>(195);
-  const [specialColor, setSpecialColor] = useState<"none" | "white" | "black">("none");
+  const [activeBg, setActiveBg] = useState<string>("white");
   const [gender, setGender] = useState<"Nam" | "Nữ">("Nam");
   const [history, setHistory] = useState<{ id: string; timestamp: number; crops: CropResult[] }[]>([]);
   const [activeSidebarTab, setActiveSidebarTab] = useState<"setup" | "outfit">("setup");
+  const [showSettings, setShowSettings] = useState(false);
+  const [userApiKey, setUserApiKey] = useState<string>("");
+  const [userBearerToken, setUserBearerToken] = useState<string>("");
+  const [authMethod, setAuthMethod] = useState<'apikey' | 'bearer'>('apikey');
+  const [apiStatus, setApiStatus] = useState<'ok' | 'fail' | 'checking' | null>(null);
+  const [user, setUser] = useState<User | null>(null);
+  const [userUsage, setUserUsage] = useState<{ totalGenerations: number } | null>(null);
 
-  const getColorName = (hue: number, special: "none" | "white" | "black" = "none") => {
-    if (special === "white") return "trắng tinh khôi";
-    if (special === "black") return "đen huyền bí chuyên nghiệp";
+  const MODEL_OPTIONS = [
+    { id: "gemini-2.5-flash-image", label: "NB 1", desc: "Nano Banana 1 (Tốc độ)" },
+    { id: "gemini-3.1-flash-image-preview", label: "NB 2", desc: "Nano Banana 2 (Chất lượng)" },
+    { id: "gemini-3-pro-image-preview", label: "Pro", desc: "Nano Banana Pro (Trung thực)" },
+  ];
 
-    if (hue >= 0 && hue < 15) return "đỏ đậm";
-    if (hue >= 15 && hue < 30) return "đỏ cam";
-    if (hue >= 30 && hue < 45) return "cam";
-    if (hue >= 45 && hue < 75) return "vàng";
-    if (hue >= 75 && hue < 105) return "vàng chanh";
-    if (hue >= 105 && hue < 150) return "xanh lá";
-    if (hue >= 150 && hue < 185) return "xanh ngọc";
-    if (hue >= 185 && hue < 205) return "xanh da trời nhạt (baby blue)";
-    if (hue >= 205 && hue < 235) return "xanh dương trung tính";
-    if (hue >= 235 && hue < 260) return "xanh navy/xanh đậm";
-    if (hue >= 260 && hue < 290) return "tím nhạt";
-    if (hue >= 290 && hue < 320) return "hồng cánh sen";
-    if (hue >= 320 && hue < 345) return "hồng đậm";
-    if (hue >= 345 && hue <= 360) return "đỏ tươi";
-    return "trắng";
+  // Hàm lấy tên màu sắc dựa trên giá trị tông màu (h) và độ bão hòa (s)
+  const getColorName = (h: number, s: number = 70) => {
+    let intensity = "";
+    if (s < 30) intensity = " rất nhạt (pastel)";
+    else if (s < 55) intensity = " nhạt";
+    else if (s > 85) intensity = " đậm rực rỡ";
+
+    if (h > 360) {
+      if (h <= 370) return "trắng tinh khôi";
+      if (h <= 385) return "xám nhạt / ghi sáng";
+      if (h <= 395) return "xám đậm / màu ghi";
+      return "đen chuyên nghiệp";
+    }
+
+    let color = "trắng";
+    if (h >= 0 && h < 15) color = "đỏ đậm";
+    else if (h >= 15 && h < 30) color = "đỏ cam";
+    else if (h >= 30 && h < 45) color = "cam";
+    else if (h >= 45 && h < 75) color = "vàng";
+    else if (h >= 75 && h < 105) color = "vàng chanh";
+    else if (h >= 105 && h < 150) color = "xanh lá";
+    else if (h >= 150 && h < 185) color = "xanh ngọc";
+    else if (h >= 185 && h < 205) color = "xanh da trời nhạt (baby blue)";
+    else if (h >= 205 && h < 235) color = "xanh dương trung tính";
+    else if (h >= 235 && h < 260) color = "xanh navy / xanh đậm";
+    else if (h >= 260 && h < 290) color = "tím nhạt";
+    else if (h >= 290 && h < 320) color = "hồng cánh sen";
+    else if (h >= 320 && h < 345) color = "hồng đậm";
+    else if (h >= 345 && h <= 360) color = "đỏ tươi";
+
+    return color + intensity;
   };
 
   const CLOTHING_TYPES = [
@@ -105,11 +137,93 @@ export default function App() {
         console.error("Failed to parse history", e);
       }
     }
+
+    const savedKey = localStorage.getItem("ai_id_photo_user_api_key");
+    if (savedKey) {
+      setUserApiKey(savedKey);
+    }
+    
+    const savedToken = localStorage.getItem("ai_id_photo_bearer_token");
+    if (savedToken) {
+      setUserBearerToken(savedToken);
+    }
+    
+    const savedAuthMethod = localStorage.getItem("ai_id_photo_auth_method") as "apikey" | "bearer" | null;
+    if (savedAuthMethod) {
+      setAuthMethod(savedAuthMethod);
+    }
+
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      if (currentUser) {
+        fetchUserUsage(currentUser.uid);
+      } else {
+        setUserUsage(null);
+      }
+    });
+
+    return () => unsubscribe();
   }, []);
+
+  const fetchUserUsage = async (uid: string) => {
+    try {
+      const docRef = doc(db, "user_usage", uid);
+      const docSnap = await getDoc(docRef);
+      if (docSnap.exists()) {
+        setUserUsage(docSnap.data() as any);
+      } else {
+        const initialData = {
+          uid,
+          email: auth.currentUser?.email || "",
+          totalGenerations: 0,
+          lastGenerationAt: serverTimestamp()
+        };
+        await setDoc(docRef, initialData);
+        setUserUsage(initialData as any);
+      }
+    } catch (e) {
+      console.error("Error fetching usage:", e);
+    }
+  };
+
+  const handleLogin = async () => {
+    try {
+      await signInWithPopup(auth, googleProvider);
+    } catch (e) {
+      console.error("Login error:", e);
+      setError("Đăng nhập thất bại. Vui lòng thử lại.");
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+    } catch (e) {
+      console.error("Logout error:", e);
+    }
+  };
 
   useEffect(() => {
     localStorage.setItem("ai_id_photo_history", JSON.stringify(history));
   }, [history]);
+
+  const saveApiKeys = () => {
+    localStorage.setItem("ai_id_photo_user_api_key", userApiKey);
+    localStorage.setItem("ai_id_photo_bearer_token", userBearerToken);
+    localStorage.setItem("ai_id_photo_auth_method", authMethod);
+    setShowSettings(false);
+  };
+
+  const checkQuota = async () => {
+    const key = authMethod === 'apikey' ? (userApiKey || process.env.GEMINI_API_KEY || "") : "";
+    const token = authMethod === 'bearer' ? userBearerToken : "";
+    
+    if (!key && !token) return;
+
+    setApiStatus('checking');
+    const result = await testApiKey(key, "gemini-3-flash-preview", token || undefined);
+    setApiStatus(result.success ? 'ok' : 'fail');
+  };
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -126,15 +240,15 @@ export default function App() {
     };
   }, [previewImage]);
 
-  const updatePrompt = (typeIds: string[], styleId: string, bgId: string, hue: number, currentGender?: "Nam" | "Nữ", special: "none" | "white" | "black" = "none") => {
+  const updatePrompt = (typeIds: string[], styleId: string, bgId: string, configsMap: Record<string, { h: number; s: number }>, currentGender?: "Nam" | "Nữ") => {
     setActiveTypes(typeIds);
     setActiveStyle(styleId);
     setActiveBg(bgId);
-    setClothingHue(hue);
-    setSpecialColor(special);
+    setTypeConfigs(configsMap);
     const g = currentGender || gender;
     if (currentGender) setGender(currentGender);
     
+    // Nhãn Tiếng Việt cho các lựa chọn
     const typeLabels: Record<string, string> = {
       shirt: "áo sơ mi cổ bẻ",
       tie: "thắt cà vạt trang trọng",
@@ -148,28 +262,40 @@ export default function App() {
     const styleLabels: Record<string, string> = {
       solid: "không có họa tiết",
       check: "họa tiết kẻ caro",
-      pattern: "có họa tiết"
+      pattern: "có họa tiết tinh tế"
     };
 
     const bgLabels: Record<string, string> = {
-      blue: "xanh trời nhạt (blue sky)",
+      blue: "xanh Azure",
       white: "trắng sạch",
       grey: "xám nhạt"
     };
 
-    const colorName = getColorName(hue, special);
-    const selectedLabels = typeIds.map(id => typeLabels[id] || "");
-    const clothingDesc = selectedLabels.join(" kết hợp với ");
+    // Tạo mô tả chi tiết trang phục kèm màu sắc từng món
+    const clothingParts = typeIds.map(id => {
+      const label = typeLabels[id] || "";
+      const config = configsMap[id] ?? { h: 195, s: 70 };
+      const color = getColorName(config.h, config.s);
+      return `${label} màu ${color}`;
+    });
+    
+    const clothingDesc = clothingParts.join(", ");
     const styleLabel = styleLabels[styleId] || "không có họa tiết";
     const bgLabel = bgLabels[bgId] || "trắng sạch";
 
-    let basePrompt = "";
-    
-    if (g === "Nam") {
-      basePrompt = `Tạo một ảnh thẻ 1×1 chân thực (dựa trên ảnh tham chiếu đã tải lên) theo phong cách chụp chân dung chuyên nghiệp, trong trang phục ${clothingDesc} màu ${colorName} ${styleLabel} trang trọng phù hợp để xin việc và với biểu cảm trung tính. Khuôn mặt dựa trên ảnh tham chiếu 100%, xóa mụn và làm mịn da 70% nhưng vẫn giữ chi tiết lỗ chân lông, nếp nhăn của da để đảm bảo tính chân thật của da. Đảm bảo khuôn mặt giống hệt với người trong ảnh đã tải lên, không thay đổi cấu trúc khuôn mặt, mắt, mũi, miệng, tông màu da hoặc màu kiểu tóc. Không thay đổi bất kỳ đặc điểm nào trên khuôn mặt như mắt, mũi và miệng. Ánh sáng studio, phông nền ${bgLabel} không tạp chất và đổ bóng, nét rõ và sắc, chất lượng cao 8K. Kiểu tóc và các chi tiết trên khuôn mặt giữ nguyên. Làm cho hình ảnh cuối cùng trông chân thực, khuôn mặt được chiếu sáng đều.`;
-    } else {
-      basePrompt = `Tạo một ảnh thẻ 1×1 chân thực (dựa trên ảnh tham chiếu đã tải lên) theo phong cách chụp chân dung chuyên nghiệp, trong trang phục ${clothingDesc} màu ${colorName} ${styleLabel} trang trọng phù hợp để xin việc và với biểu cảm trung tính. Khuôn mặt dựa trên ảnh tham chiếu 100%, xóa mụn và làm mịn da 80% nhưng vẫn giữ chi tiết lỗ chân lông, nếp nhăn của da để đảm bảo tính chân thật của da. Đôi môi đầy đặn với sắc son hồng nhạt tự nhiên, hơi hé mở. Đảm bảo khuôn mặt giống hệt với người trong ảnh đã tải lên, không thay đổi cấu trúc khuôn mặt, mắt, mũi, miệng, tông màu da hoặc màu kiểu tóc. Không thay đổi bất kỳ đặc điểm nào trên khuôn mặt như mắt, mũi và miệng. Ánh sáng studio, phông nền ${bgLabel} không tạp chất và đổ bóng, nét rõ và sắc, chất lượng cao 8K. Kiểu tóc và các chi tiết trên khuôn mặt giữ nguyên. Làm cho hình ảnh cuối cùng trông chân thực, khuôn mặt được chiếu sáng đều.`;
-    }
+    let basePrompt = `[SYSTEM INSTRUCTION] This is a professional ID photo replacement task. You must keep the face of the person in the attached image EXACTLY the same. Change ONLY the clothes and the background according to the requirements below.
+
+[REQUIREMENTS]
+1. FACE: Keep 100% of the person's identity, facial structures, eyes, nose, mouth, skin tone, and hair from the reference image.
+2. CLOTHING: Replace current clothes with: ${clothingDesc}, ${styleLabel}. The attire should be professional for a job ID.
+3. BACKGROUND: Replace current background with: ${bgLabel} (plain, solid color, no gradients, no shadows).
+4. STYLE: Professional passport-style headshot, studio lighting, sharp focus, neutral expression.
+
+[PROMPT]
+Tạo một ảnh thẻ chân thực dựa trên người trong ảnh tham chiếu. 
+Giữ nguyên khuôn mặt và đặc điểm nhận dạng. 
+Trang phục: ${clothingDesc}, ${styleLabel}, lịch sự. 
+Phông nền: ${bgLabel}, trơn.`;
 
     setPrompt(basePrompt);
   };
@@ -189,22 +315,10 @@ export default function App() {
       setOriginalImage(base64);
       setError(null);
       
-      setIsLoading(true);
-      try {
-        const { gender: detectedGender } = await detectGenderAndGetPrompt(base64);
-        
-        // Use professional template based on detected gender
-        updatePrompt(["shirt"], "solid", "white", 195, detectedGender as "Nam" | "Nữ", "none");
-        
-        setStep("review-prompt");
-      } catch (err: any) {
-        console.error(err);
-        setError(err.message || "Không thể nhận diện ảnh. Vui lòng thử lại với ảnh rõ nét hơn.");
-        setOriginalImage(null);
-        setStep("upload");
-      } finally {
-        setIsLoading(false);
-      }
+      // Không cần phân tích giới tính nữa, mặc định sử dụng giới tính hiện tại hoặc cho phép người dùng chọn
+      updatePrompt(activeTypes, activeStyle, activeBg, typeConfigs, gender);
+      setFocusedType("shirt");
+      setStep("review-prompt");
     };
     reader.readAsDataURL(file);
   };
@@ -220,37 +334,77 @@ export default function App() {
     setStep("generating");
     setError(null);
 
-    try {
-      const result = await generateIdPhoto(originalImage, prompt, selectedModel);
-      setResultImage(result);
-      
-      // Create crops for BOTH original and result for comparison
-      const [cropResults, origCropResults] = await Promise.all([
-        createCrops(result),
-        originalImage ? createCrops(originalImage) : Promise.resolve([])
-      ]);
+    const modelsToTry = [
+      selectedModel,
+      ...MODEL_OPTIONS.map(m => m.id).filter(id => id !== selectedModel)
+    ];
 
-      setCrops(cropResults);
-      setOriginalCrops(origCropResults);
-      setStep("result");
-      setActiveCropIdx(1);
+    let lastError = "";
+    let success = false;
 
-      // Add to history
-      setHistory(prev => [
-        {
-          id: Date.now().toString(),
-          timestamp: Date.now(),
-          crops: cropResults
-        },
-        ...prev
-      ].slice(0, 5)); // Keep only last 5 in UI for "recent"
-    } catch (err: any) {
-      console.error(err);
-      setError(err.message || "Đã xảy ra lỗi khi tạo ảnh. Vui lòng thử lại.");
-      setStep("review-prompt");
-    } finally {
-      setIsLoading(false);
+    for (const modelId of modelsToTry) {
+      try {
+        const result = await generateIdPhoto(
+          originalImage, 
+          prompt, 
+          modelId, 
+          authMethod === 'apikey' ? (userApiKey || undefined) : undefined, 
+          authMethod === 'bearer' ? (userBearerToken || undefined) : undefined
+        );
+        setResultImage(result);
+        
+        // Update usage in Firestore if logged in
+        if (user) {
+          const docRef = doc(db, "user_usage", user.uid);
+          await updateDoc(docRef, {
+            totalGenerations: increment(1),
+            lastGenerationAt: serverTimestamp()
+          });
+          fetchUserUsage(user.uid);
+        }
+        
+        // Create crops for BOTH original and result for comparison
+        const [cropResults, origCropResults] = await Promise.all([
+          createCrops(result),
+          originalImage ? createCrops(originalImage) : Promise.resolve([])
+        ]);
+
+        setCrops(cropResults);
+        setOriginalCrops(origCropResults);
+        setStep("result");
+        setActiveCropIdx(1);
+
+        // Add to history
+        setHistory(prev => [
+          {
+            id: Date.now().toString(),
+            timestamp: Date.now(),
+            crops: cropResults
+          },
+          ...prev
+        ].slice(0, 5)); // Keep only last 5 in UI for "recent"
+        
+        success = true;
+        break; // Exit loop on success
+      } catch (err: any) {
+        console.error(`Error with model ${modelId}:`, err);
+        lastError = err.message || "Đã xảy ra lỗi khi tạo ảnh.";
+        
+        // If not a quota error or permission error, don't bother trying other models (likely a prompt/safety issue)
+        if (!lastError.includes("429") && !lastError.includes("hạn mức") && !lastError.includes("403") && !lastError.includes("quyền truy cập")) {
+          break;
+        }
+        
+        // If it is a quota error, the loop will continue to try the next model
+      }
     }
+
+    if (!success) {
+      setError(lastError);
+      setStep("review-prompt");
+    }
+    
+    setIsLoading(false);
   };
 
   const createCrops = async (imageUrl: string): Promise<CropResult[]> => {
@@ -402,6 +556,7 @@ export default function App() {
     setOriginalImage(null);
     setGender("Nam");
     setPrompt("");
+    setActiveBg("white");
     setResultImage(null);
     setCrops([]);
     setOriginalCrops([]);
@@ -420,6 +575,36 @@ export default function App() {
           <h1 className="text-lg font-bold tracking-tight">AI Photo <span className="text-amber-400">Pro</span></h1>
         </div>
         <div className="flex gap-4">
+          {user ? (
+            <div className="flex items-center gap-3">
+              <div className="flex flex-col items-end">
+                <span className="text-[10px] font-bold text-slate-300">{user.displayName || user.email}</span>
+                <span className="text-[8px] text-amber-400 uppercase font-black">Quota: {userUsage?.totalGenerations || 0} used</span>
+              </div>
+              <button 
+                onClick={handleLogout}
+                className="p-2 bg-slate-800 hover:bg-red-900/40 text-slate-400 hover:text-red-400 rounded-lg border border-slate-700 transition-all"
+                title="Đăng xuất"
+              >
+                <RotateCcw size={14} />
+              </button>
+            </div>
+          ) : (
+            <button 
+              onClick={handleLogin}
+              className="flex items-center gap-2 px-4 py-1.5 bg-amber-400 hover:bg-amber-300 text-slate-950 rounded-lg shadow-lg shadow-amber-900/20 transition-all text-xs font-black uppercase tracking-wider"
+            >
+              <UserIcon size={14} />
+              <span>Đăng nhập</span>
+            </button>
+          )}
+          <button 
+            onClick={() => setShowSettings(true)}
+            className="flex items-center gap-2 px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-amber-400 rounded-lg border border-slate-700 transition-all text-xs font-bold"
+          >
+            <Settings size={14} />
+            <span>Cài đặt API</span>
+          </button>
           <div className="flex items-center gap-2 px-3 py-1 bg-slate-800 rounded-full border border-slate-700 text-xs">
             <span className={`w-2 h-2 rounded-full ${isLoading ? 'bg-amber-400 animate-pulse' : 'bg-green-500'}`}></span>
             {isLoading ? 'Processing' : 'Engine Ready'}
@@ -483,21 +668,17 @@ export default function App() {
                       <div className="w-5 h-5 rounded-full bg-amber-400 text-slate-950 flex items-center justify-center text-[10px] font-black">2</div>
                       <h2 className="text-xs font-bold uppercase tracking-wider text-slate-300">AI Prompt</h2>
                     </div>
-                    <div className="flex gap-1 p-1 bg-slate-950 rounded-lg border border-slate-800">
-                      <button 
-                        onClick={() => setSelectedModel("gemini-3.1-flash-image-preview")}
-                        className={`px-2 py-0.5 text-[10px] rounded font-bold transition-all ${selectedModel === "gemini-3.1-flash-image-preview" ? 'bg-amber-400 text-slate-950' : 'text-slate-500 hover:text-slate-300'}`}
-                        title="Nano Banana 2 (High Quality)"
-                      >
-                        NB2
-                      </button>
-                      <button 
-                        onClick={() => setSelectedModel("gemini-2.5-flash-image")}
-                        className={`px-2 py-0.5 text-[10px] rounded font-bold transition-all ${selectedModel === "gemini-2.5-flash-image" ? 'bg-amber-400 text-slate-950' : 'text-slate-500 hover:text-slate-300'}`}
-                        title="Nano Banana 1 (Fallback)"
-                      >
-                        NB1
-                      </button>
+                    <div className="flex gap-1 p-1 bg-slate-950 rounded-lg border border-slate-800 overflow-x-auto custom-scrollbar">
+                      {MODEL_OPTIONS.map(opt => (
+                        <button 
+                          key={opt.id}
+                          onClick={() => setSelectedModel(opt.id)}
+                          className={`px-2 py-0.5 text-[10px] rounded font-bold transition-all whitespace-nowrap ${selectedModel === opt.id ? 'bg-amber-400 text-slate-950' : 'text-slate-500 hover:text-slate-300'}`}
+                          title={opt.desc}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
                     </div>
                   </div>
                   <textarea 
@@ -524,7 +705,7 @@ export default function App() {
                       {(["Nam", "Nữ"] as const).map(g => (
                         <button
                           key={g}
-                          onClick={() => updatePrompt(activeTypes, activeStyle, activeBg, clothingHue, g, specialColor)}
+                          onClick={() => updatePrompt(activeTypes, activeStyle, activeBg, typeConfigs, g)}
                           disabled={step === "upload" || isLoading}
                           className={`flex-1 py-2 text-[10px] font-bold uppercase rounded-lg border transition-all ${gender === g ? 'bg-amber-400 text-slate-950 border-amber-400 shadow-lg shadow-amber-400/10' : 'bg-slate-950 text-slate-400 border-slate-800 hover:border-slate-600'}`}
                         >
@@ -535,71 +716,113 @@ export default function App() {
                   </div>
 
                   <div className="grid grid-cols-1 gap-2">
-                    <span className="text-[10px] font-bold text-slate-600 uppercase">Loại áo (chọn nhiều):</span>
+                    <span className="text-[10px] font-bold text-slate-600 uppercase">Loại áo (chọn nhiều - nhấn để chỉnh màu):</span>
                     <div className="flex flex-wrap gap-2">
                       {CLOTHING_TYPES.map(t => {
                         const isActive = activeTypes.includes(t.id);
+                        const isFocused = focusedType === t.id;
                         return (
                           <button
                             key={t.id}
                             onClick={() => {
-                              const next = isActive 
-                                ? activeTypes.filter(id => id !== t.id)
-                                : [...activeTypes, t.id];
-                              if (next.length === 0) next.push("shirt");
-                              updatePrompt(next, activeStyle, activeBg, clothingHue, gender, specialColor);
+                              let nextTypes = [...activeTypes];
+                              let nextConfigs = { ...typeConfigs };
+                              
+                              if (!isActive) {
+                                // Nếu chưa chọn: thêm vào danh sách và đặt focus
+                                nextTypes.push(t.id);
+                                if (nextConfigs[t.id] === undefined) {
+                                  nextConfigs[t.id] = { h: 195, s: 70 }; // Mặc định cho món đồ mới
+                                }
+                                setFocusedType(t.id);
+                              } else {
+                                // Nếu đang isActive:
+                                if (isFocused) {
+                                  // Nếu đang focus rồi: bỏ chọn món này
+                                  nextTypes = nextTypes.filter(id => id !== t.id);
+                                  if (nextTypes.length === 0) {
+                                    nextTypes = ["shirt"];
+                                    nextConfigs["shirt"] = nextConfigs["shirt"] ?? { h: 195, s: 70 };
+                                  }
+                                  setFocusedType(nextTypes[nextTypes.length - 1]);
+                                } else {
+                                  // Nếu chưa focus: chỉ đặt focus để chỉnh màu
+                                  setFocusedType(t.id);
+                                }
+                              }
+                              updatePrompt(nextTypes, activeStyle, activeBg, nextConfigs, gender);
                             }}
                             disabled={step === "upload" || isLoading}
-                            className={`px-3 py-1.5 text-[10px] font-bold uppercase rounded-lg border transition-all ${isActive ? 'bg-amber-400 text-slate-950 border-amber-400 shadow-lg shadow-amber-400/10' : 'bg-slate-950 text-slate-400 border-slate-800 hover:border-slate-600'}`}
+                            className={`px-3 py-1.5 text-[10px] font-bold uppercase rounded-lg border transition-all relative ${
+                              isActive 
+                                ? isFocused 
+                                  ? 'bg-amber-400 text-slate-950 border-amber-500 ring-2 ring-amber-400/30' 
+                                  : 'bg-amber-600/40 text-amber-200 border-amber-600/50'
+                                : 'bg-slate-950 text-slate-400 border-slate-800 hover:border-slate-600'
+                            }`}
                           >
                             {t.label}
+                            {isActive && isFocused && <div className="absolute -top-1 -right-1 w-2 h-2 bg-amber-400 rounded-full animate-pulse" />}
                           </button>
                         );
                       })}
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-1 gap-2">
-                    <span className="text-[10px] font-bold text-slate-600 uppercase flex justify-between">
-                      Màu sắc: <span className="text-amber-400">{getColorName(clothingHue, specialColor).toUpperCase()}</span>
-                    </span>
-                    <div className="flex gap-2 mb-1">
-                      <button 
-                        onClick={() => updatePrompt(activeTypes, activeStyle, activeBg, clothingHue, gender, "white")}
-                        className={`flex-1 py-1 text-[9px] font-black uppercase border rounded-md transition-all ${specialColor === "white" ? 'bg-white text-slate-950 border-white' : 'bg-slate-950 text-white border-slate-800'}`}
-                      >
-                        Màu Trắng
-                      </button>
-                      <button 
-                        onClick={() => updatePrompt(activeTypes, activeStyle, activeBg, clothingHue, gender, "black")}
-                        className={`flex-1 py-1 text-[9px] font-black uppercase border rounded-md transition-all ${specialColor === "black" ? 'bg-slate-200 text-slate-950 border-white' : 'bg-slate-950 text-slate-400 border-slate-800'}`}
-                      >
-                        Màu Đen
-                      </button>
-                      <button 
-                        onClick={() => updatePrompt(activeTypes, activeStyle, activeBg, clothingHue, gender, "none")}
-                        className={`flex-1 py-1 text-[9px] font-black uppercase border rounded-md transition-all ${specialColor === "none" ? 'bg-amber-400 text-slate-950 border-amber-400' : 'bg-slate-950 text-slate-400 border-slate-800'}`}
-                      >
-                        Dải Màu
-                      </button>
-                    </div>
-                    {specialColor === "none" && (
+                  <div className="grid grid-cols-1 gap-3 p-3 bg-slate-950/50 rounded-xl border border-slate-800/50">
+                    <div className="flex flex-col gap-1.5">
+                      <span className="text-[10px] font-bold text-slate-600 uppercase flex justify-between">
+                        Tông màu cho {CLOTHING_TYPES.find(t => t.id === focusedType)?.label || "áo"}: 
+                        <span className="text-amber-400">{getColorName(typeConfigs[focusedType]?.h ?? 195, typeConfigs[focusedType]?.s ?? 70).toUpperCase()}</span>
+                      </span>
                       <div className="relative h-6 flex items-center group">
                         <input 
                           type="range"
                           min="0"
-                          max="360"
-                          value={clothingHue}
-                          onChange={(e) => updatePrompt(activeTypes, activeStyle, activeBg, parseInt(e.target.value), gender, "none")}
+                          max="400"
+                          value={typeConfigs[focusedType]?.h ?? 195}
+                          onChange={(e) => {
+                            const val = parseInt(e.target.value);
+                            const nextConfigs = { ...typeConfigs, [focusedType]: { ...(typeConfigs[focusedType] ?? { h: 195, s: 70 }), h: val } };
+                            updatePrompt(activeTypes, activeStyle, activeBg, nextConfigs, gender);
+                          }}
                           disabled={step === "upload" || isLoading}
                           className="w-full h-3 rounded-full appearance-none cursor-pointer outline-none transition-opacity disabled:opacity-30"
                           style={{
-                            background: "linear-gradient(to right, #ff0000, #ffff00, #00ff00, #00ffff, #0000ff, #ff00ff, #ff0000)"
+                            background: "linear-gradient(to right, #ff0000 0%, #ffff00 22.5%, #00ff00 45%, #00ffff 56%, #0000ff 67.5%, #ff00ff 90%, #ff0000 90%, #ffffff 92.5%, #888888 95%, #444444 97.5%, #000000 100%)"
                           }}
                         />
                         <div className="absolute inset-0 pointer-events-none rounded-full border border-slate-800 ring-2 ring-slate-950" />
                       </div>
-                    )}
+                    </div>
+
+                    <div className="flex flex-col gap-1.5">
+                      <span className="text-[10px] font-bold text-slate-600 uppercase flex justify-between">
+                        Độ bão hòa (Saturation): 
+                        <span className="text-amber-400">{(typeConfigs[focusedType]?.s ?? 70)}%</span>
+                      </span>
+                      <div className="relative h-6 flex items-center group">
+                        <input 
+                          type="range"
+                          min="0"
+                          max="100"
+                          value={typeConfigs[focusedType]?.s ?? 70}
+                          onChange={(e) => {
+                            const val = parseInt(e.target.value);
+                            const nextConfigs = { ...typeConfigs, [focusedType]: { ...(typeConfigs[focusedType] ?? { h: 195, s: 70 }), s: val } };
+                            updatePrompt(activeTypes, activeStyle, activeBg, nextConfigs, gender);
+                          }}
+                          disabled={step === "upload" || isLoading || (typeConfigs[focusedType]?.h ?? 0) > 360}
+                          className="w-full h-3 rounded-full appearance-none cursor-pointer outline-none transition-opacity disabled:opacity-30"
+                          style={{
+                            background: `linear-gradient(to right, #ffffff, ${
+                              (typeConfigs[focusedType]?.h ?? 0) > 360 ? '#888888' : 'hsl(' + (typeConfigs[focusedType]?.h ?? 195) + ', 100%, 50%)'
+                            })`
+                          }}
+                        />
+                        <div className="absolute inset-0 pointer-events-none rounded-full border border-slate-800 ring-2 ring-slate-950" />
+                      </div>
+                    </div>
                   </div>
 
                   <div className="grid grid-cols-1 gap-2">
@@ -608,7 +831,7 @@ export default function App() {
                       {CLOTHING_STYLES.map(s => (
                         <button
                           key={s.id}
-                          onClick={() => updatePrompt(activeTypes, s.id, activeBg, clothingHue, gender, specialColor)}
+                          onClick={() => updatePrompt(activeTypes, s.id, activeBg, typeConfigs, gender)}
                           disabled={step === "upload" || isLoading}
                           className={`px-1 py-1.5 text-[9px] font-bold uppercase rounded-lg border transition-all truncate text-center ${activeStyle === s.id ? 'bg-amber-400 text-slate-950 border-amber-400 shadow-lg shadow-amber-400/10' : 'bg-slate-950 text-slate-400 border-slate-800 hover:border-slate-600'}`}
                         >
@@ -624,7 +847,7 @@ export default function App() {
                       {BACKGROUND_COLORS.map(b => (
                         <button
                           key={b.id}
-                          onClick={() => updatePrompt(activeTypes, activeStyle, b.id, clothingHue, gender, specialColor)}
+                          onClick={() => updatePrompt(activeTypes, activeStyle, b.id, typeConfigs, gender)}
                           disabled={step === "upload" || isLoading}
                           className={`flex items-center justify-center gap-1 px-2 py-2 text-[9px] font-bold uppercase rounded-lg border transition-all ${activeBg === b.id ? 'bg-amber-400 text-slate-950 border-amber-400 shadow-lg shadow-amber-400/10' : 'bg-slate-950 text-slate-400 border-slate-800 hover:border-slate-600'}`}
                         >
@@ -911,6 +1134,152 @@ export default function App() {
         <div className="flex-1"></div>
         <span className="text-slate-500">SYSTEM STATUS: <span className="text-green-500 font-bold">OPTIMIZED</span></span>
       </footer>
+
+      {/* Settings Modal */}
+      <AnimatePresence>
+        {showSettings && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowSettings(false)}
+              className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative w-full max-w-lg bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl overflow-hidden"
+            >
+              <div className="p-6 border-b border-white/5 bg-gradient-to-br from-slate-800/50 to-slate-900/50">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 bg-amber-400/10 rounded-xl flex items-center justify-center text-amber-400">
+                    <Key size={20} />
+                  </div>
+                  <div>
+                    <h2 className="text-lg font-bold text-white">Cài đặt API & Models</h2>
+                    <p className="text-xs text-slate-500">Tùy chỉnh API key để tránh giới hạn hạn mức (quota)</p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="p-6 space-y-6 max-h-[60vh] overflow-y-auto custom-scrollbar bg-slate-900">
+                <div className="space-y-4">
+                  <div className="flex bg-slate-950 p-1 rounded-xl mb-2">
+                    <button
+                      onClick={() => setAuthMethod('apikey')}
+                      className={`flex-1 text-xs font-bold py-2 rounded-lg transition-all ${authMethod === 'apikey' ? 'bg-slate-800 text-amber-400' : 'text-slate-500 hover:text-slate-300'}`}
+                    >
+                      Gemini API Key
+                    </button>
+                    <button
+                      onClick={() => setAuthMethod('bearer')}
+                      className={`flex-1 text-xs font-bold py-2 rounded-lg transition-all ${authMethod === 'bearer' ? 'bg-slate-800 text-amber-400' : 'text-slate-500 hover:text-slate-300'}`}
+                    >
+                      Bearer Token
+                    </button>
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    <label className="text-[10px] font-black uppercase tracking-wider text-slate-500">
+                      {authMethod === 'apikey' ? 'Gemini API Key' : 'Google Bearer Token'}
+                    </label>
+                    <button 
+                      onClick={checkQuota}
+                      disabled={apiStatus === 'checking'}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-[10px] font-bold transition-all text-slate-300 border border-white/5"
+                    >
+                      {apiStatus === 'checking' ? (
+                        <Loader2 size={12} className="animate-spin" />
+                      ) : apiStatus === 'ok' ? (
+                        <CheckCircle2 size={12} className="text-green-500" />
+                      ) : apiStatus === 'fail' ? (
+                        <ShieldCheck size={12} className="text-red-500" />
+                      ) : (
+                        <Zap size={12} className="text-amber-400" />
+                      )}
+                      <span>{apiStatus === 'ok' ? 'ĐÃ KIỂM TRA' : apiStatus === 'fail' ? 'LỖI' : 'KIỂM TRA HẠN MỨC'}</span>
+                    </button>
+                  </div>
+                  
+                  {authMethod === 'apikey' ? (
+                    <div className="relative">
+                      <div className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-600">
+                        <Key size={14} />
+                      </div>
+                      <input 
+                        type="password"
+                        value={userApiKey}
+                        onChange={(e) => setUserApiKey(e.target.value)}
+                        placeholder="Nhập API Key của bạn tại đây..."
+                        className="w-full bg-slate-950 border border-slate-800 rounded-xl py-3 pl-10 pr-4 text-xs font-mono text-amber-200 focus:outline-none focus:ring-2 focus:ring-amber-500/20 transition-all border-slate-700"
+                      />
+                    </div>
+                  ) : (
+                    <div className="relative mt-2">
+                      <div className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-600">
+                        <ShieldCheck size={14} />
+                      </div>
+                      <input 
+                        type="password"
+                        value={userBearerToken}
+                        onChange={(e) => setUserBearerToken(e.target.value)}
+                        placeholder="Nhập Bearer Token (Bắt đầu với ya29...)"
+                        className="w-full bg-slate-950 border border-slate-800 rounded-xl py-3 pl-10 pr-4 text-xs font-mono text-amber-200 focus:outline-none focus:ring-2 focus:ring-amber-500/20 transition-all border-slate-700"
+                      />
+                    </div>
+                  )}
+                </div>
+                
+                <div className="space-y-3">
+                  <label className="text-[10px] font-black uppercase tracking-wider text-slate-500">Model Đang Sử Dụng</label>
+                  <div className="grid grid-cols-1 gap-2">
+                    {MODEL_OPTIONS.map(opt => (
+                      <button
+                        key={opt.id}
+                        onClick={() => setSelectedModel(opt.id)}
+                        className={`flex items-center justify-between p-3 rounded-xl border transition-all ${
+                          selectedModel === opt.id 
+                            ? 'bg-amber-400/10 border-amber-400/50 text-amber-400' 
+                            : 'bg-slate-950/50 border-slate-800 text-slate-400 hover:border-slate-600'
+                        }`}
+                      >
+                        <div className="text-left">
+                          <p className="text-[11px] font-bold uppercase">{opt.label}</p>
+                          <p className="text-[9px] opacity-60">{opt.desc}</p>
+                        </div>
+                        {selectedModel === opt.id && <CheckCircle2 size={14} />}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                
+                <div className="p-4 bg-amber-400/5 border border-amber-400/20 rounded-xl">
+                  <p className="text-[10px] text-amber-200/60 leading-relaxed italic">
+                    * Lưu ý: Chỉ cần 1 API key duy nhất cho toàn bộ hệ thống. Nếu bạn không nhập, hệ thống sẽ sử dụng key mặc định.
+                  </p>
+                </div>
+              </div>
+
+              <div className="p-6 bg-slate-950/50 flex gap-3">
+                <button 
+                  onClick={() => setShowSettings(false)}
+                  className="flex-1 py-3 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl font-bold text-xs uppercase tracking-widest transition-all"
+                >
+                  Hủy
+                </button>
+                <button 
+                  onClick={saveApiKeys}
+                  className="flex-1 py-3 bg-amber-400 hover:bg-amber-300 text-slate-950 rounded-xl font-bold text-xs uppercase tracking-widest transition-all shadow-lg shadow-amber-900/20"
+                >
+                  Lưu thiết lập
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
