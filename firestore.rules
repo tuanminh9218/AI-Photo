@@ -14,6 +14,22 @@ service cloud.firestore {
       return request.auth.token.email_verified == true;
     }
 
+    function isValidId(id) {
+      return id is string && id.size() <= 200 && id.matches('^[a-zA-Z0-9_\\-,.\\s]+$');
+    }
+
+    function isValidPreviewAsset(data, assetId) {
+      return data.url is string && data.url.size() < 1000000
+        && data.key == assetId
+        && data.gender in ['Nam', 'Nữ']
+        && (data.intensity is number || data.intensity is int)
+        && data.types is list && data.types.size() <= 10
+        && data.style is string
+        && data.bg is string
+        && data.lighting is string
+        && data.createdAt == request.time;
+    }
+
     // Default deny
     match /{document=**} {
       allow read, write: if false;
@@ -29,6 +45,14 @@ service cloud.firestore {
       allow update: if isOwner(userId) 
         && request.resource.data.uid == userId
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastGenerationAt', 'totalGenerations']);
+    }
+
+    // Global Preview Assets Cache
+    match /preview_assets/{assetId} {
+      allow get: if isSignedIn();
+      allow create: if isSignedIn() 
+        && isValidId(assetId)
+        && isValidPreviewAsset(request.resource.data, assetId);
     }
   }
 }

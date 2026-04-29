@@ -11,12 +11,32 @@
         "totalGenerations": { "type": "integer", "description": "Total generations performed" }
       },
       "required": ["uid", "email"]
+    },
+    "preview_asset": {
+      "title": "Preview Asset",
+      "description": "Cached 2D/3D preview images for specific configuration combinations",
+      "type": "object",
+      "properties": {
+        "url": { "type": "string", "description": "Storage or base64 URL of the image" },
+        "key": { "type": "string", "description": "Unique key for the configuration" },
+        "gender": { "type": "string" },
+        "types": { "type": "array", "items": { "type": "string" } },
+        "style": { "type": "string" },
+        "bg": { "type": "string" },
+        "lighting": { "type": "string" },
+        "intensity": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      }
     }
   },
   "firestore": {
     "/user_usage/{userId}": {
       "schema": "user_usage",
       "description": "Stores usage limits and activity for a user"
+    },
+    "/preview_assets/{assetId}": {
+      "schema": "preview_asset",
+      "description": "Global cache for preview images"
     }
   }
 }

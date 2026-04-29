@@ -54,7 +54,14 @@ export default function App() {
   const [activeBg, setActiveBg] = useState<string>("white");
   const [lightingIntensity, setLightingIntensity] = useState<number>(75);
   const [lightingDirection, setLightingDirection] = useState<string>("front");
+  const [preview2DImage, setPreview2DImage] = useState<string | null>(null);
+  const [isPreviewLoading, setIsPreviewLoading] = useState(false);
+  const [isCached, setIsCached] = useState(false);
   const [gender, setGender] = useState<"Nam" | "Nữ">("Nam");
+  const [skinSmoothing, setSkinSmoothing] = useState<number>(0);
+  const [lipstickEnabled, setLipstickEnabled] = useState<boolean>(false);
+  const [lipstickColor, setLipstickColor] = useState<{h: number, s: number}>({h: 350, s: 80});
+  const [resolution, setResolution] = useState<"standard" | "4k" | "8k">("standard");
   const [history, setHistory] = useState<{ id: string; timestamp: number; crops: CropResult[] }[]>([]);
   const [activeSidebarTab, setActiveSidebarTab] = useState<"setup" | "outfit">("setup");
   const [showSettings, setShowSettings] = useState(false);
@@ -105,6 +112,7 @@ export default function App() {
   };
 
   const CLOTHING_TYPES = [
+    { id: "original", label: "Trang phục gốc", desc: "giữ nguyên trang phục hiện tại nhưng làm phẳng mượt như mới" },
     { id: "shirt", label: "Sơ mi", desc: "formal white shirt with a sharp collar" },
     { id: "tie", label: "Cà vạt", desc: "professional shirt with a formal necktie" },
     { id: "vest", label: "Áo vest", desc: "formal business suit with a dark blazer and necktie" },
@@ -173,6 +181,80 @@ export default function App() {
 
     return () => unsubscribe();
   }, []);
+
+  useEffect(() => {
+    if (step === "review-prompt" && originalImage && prompt) {
+      const timer = setTimeout(async () => {
+        setIsPreviewLoading(true);
+        setIsCached(false);
+        
+        // Generate a unique key for this combination to check database
+        // Bucketize intensity to nearest 5 to reduce variations
+        const bIntensity = Math.round(lightingIntensity / 5) * 5;
+        const smoothKey = skinSmoothing > 0 ? `_sm${skinSmoothing}` : '';
+        const lpKey = (gender === "Nữ" && lipstickEnabled) ? `_lp${lipstickColor.h}_s${Math.round(lipstickColor.s / 5) * 5}` : '';
+        const resKey = resolution !== "standard" ? `_${resolution}` : '';
+        const sortedTypes = [...activeTypes].sort().join('_'); // Use underscore instead of comma
+        const assetKey = `preview_${gender}_${sortedTypes}_${activeStyle}_${activeBg}_${lightingDirection}_${bIntensity}${smoothKey}${lpKey}${resKey}`.toLowerCase();
+
+        try {
+          // 1. Check if we have this in our "pre-generated" database (Firestore)
+          const assetRef = doc(db, "preview_assets", assetKey);
+          const assetSnap = await getDoc(assetRef);
+          
+          if (assetSnap.exists()) {
+            setPreview2DImage(assetSnap.data().url);
+            setIsCached(true);
+            setIsPreviewLoading(false);
+            return;
+          }
+
+          // 2. If not in DB, generate it one last time and save
+          const outfitDesc = activeTypes.includes("original") 
+            ? "formal modern clothing, sharp and neat" 
+            : (prompt.split("Trang phục:")[1]?.split("Phông nền:")[0] || "formal attire");
+            
+          const previewPrompt = `High-quality 2D digital illustration, professional character headshot, no text, no watermark. Character features: ${gender === "Nam" ? "modern male" : "modern female"}. Outfit: ${outfitDesc}. Background: ${activeBg}. Lighting: ${lightingDirection}. Art style: clean minimalist 2D digital painting, soft vector style, elegant lines, professional studio lighting, high resolution.`;
+          
+          const result = await generateIdPhoto(
+            "", // No reference image
+            previewPrompt,
+            "gemini-2.5-flash-image",
+            authMethod === 'apikey' ? (userApiKey || undefined) : undefined,
+            authMethod === 'bearer' ? (userBearerToken || undefined) : undefined
+          );
+
+          // Compress before saving to Firestore to stay under 1MB limit
+          const compressedPreview = await compressImage(result, 300, 0.6);
+
+          // Save to database for future users
+          try {
+            await setDoc(assetRef, {
+              url: compressedPreview, // Store compressed version
+              key: assetKey,
+              gender,
+              types: activeTypes,
+              style: activeStyle,
+              bg: activeBg,
+              lighting: lightingDirection,
+              intensity: bIntensity,
+              createdAt: serverTimestamp()
+            });
+          } catch (dbErr) {
+            console.error("Failed to save asset to DB:", dbErr);
+          }
+
+          setPreview2DImage(result);
+        } catch (e) {
+          console.error("Failed to generate/fetch 2D preview:", e);
+        } finally {
+          setIsPreviewLoading(false);
+        }
+      }, 800); // Faster debounce as we check DB first
+
+      return () => clearTimeout(timer);
+    }
+  }, [prompt, step, activeTypes, activeStyle, activeBg, gender, lightingIntensity, lightingDirection]);
 
   const fetchUserUsage = async (uid: string) => {
     try {
@@ -256,7 +338,11 @@ export default function App() {
     configsMap: Record<string, { h: number; s: number }>, 
     currentGender?: "Nam" | "Nữ",
     lintensity?: number,
-    ldirection?: string
+    ldirection?: string,
+    ssmoothing?: number,
+    lpEnabled?: boolean,
+    lpColor?: { h: number, s: number },
+    resol?: "standard" | "4k" | "8k"
   ) => {
     setActiveTypes(typeIds);
     setActiveStyle(styleId);
@@ -268,9 +354,17 @@ export default function App() {
     
     const li = lintensity !== undefined ? lintensity : lightingIntensity;
     const ld = ldirection !== undefined ? ldirection : lightingDirection;
+    const smooth = ssmoothing !== undefined ? ssmoothing : skinSmoothing;
+    const isLp = lpEnabled !== undefined ? lpEnabled : lipstickEnabled;
+    const lclr = lpColor !== undefined ? lpColor : lipstickColor;
+    const currentResolution = resol !== undefined ? resol : resolution;
     
     setLightingIntensity(li);
     setLightingDirection(ld);
+    if (ssmoothing !== undefined) setSkinSmoothing(smooth);
+    if (lpEnabled !== undefined) setLipstickEnabled(isLp);
+    if (lpColor !== undefined) setLipstickColor(lclr);
+    if (resol !== undefined) setResolution(currentResolution);
     
     // Nhãn Tiếng Việt cho các lựa chọn
     const typeLabels: Record<string, string> = {
@@ -297,11 +391,12 @@ export default function App() {
 
     // Tạo mô tả chi tiết trang phục kèm màu sắc từng món
     const clothingParts = typeIds.map(id => {
+      if (id === "original") return ""; // Xử lý riêng biệt
       const label = typeLabels[id] || "";
       const config = configsMap[id] ?? { h: 195, s: 70 };
       const color = getColorName(config.h, config.s);
       return `${label} màu ${color}`;
-    });
+    }).filter(p => p !== "");
     
     const clothingDesc = clothingParts.join(", ");
     const styleLabel = styleLabels[styleId] || "không có họa tiết";
@@ -312,21 +407,54 @@ export default function App() {
     const intensityDesc = li > 85 ? "very bright professional" : li < 35 ? "soft subtle" : "balanced";
     const lightingDesc = `${intensityDesc} ${lightingOpt.prompt}`;
 
+    const isOriginal = typeIds.includes("original");
+    const clothingRequirementEn = isOriginal 
+        ? `2. CLOTHING: STRICTLY KEEP the original outfit from the reference image, but edit it to be perfectly smooth, flat, brand-new looking, with ZERO wrinkles and ZERO folds.`
+        : `2. CLOTHING: Replace current clothes with: ${clothingDesc}, ${styleLabel}. The attire should be professional for a job ID.`;
+        
+    const clothingRequirementVi = isOriginal
+        ? `Giữ nguyên trang phục gốc, chỉnh sửa cho bề mặt vải thật phẳng, mượt như mới, tuyệt đối không có nếp gấp hay nếp nhăn.`
+        : `Trang phục: ${clothingDesc}, ${styleLabel}, lịch sự, không chữ, không hình mờ (no text, no watermark).`;
+
+    const skinSmoothingEn = smooth > 0 
+        ? `\n6. SKIN RETOUCHING: Apply ${smooth}% skin smoothing. Crucially, retain realistic skin textures, pores, and fine lines so the skin does not look plastic or overly airbrushed.` 
+        : "";
+    const skinSmoothingVi = smooth > 0
+        ? `\nLàm mịn da: ${smooth}% (lưu ý giữ lại chi tiết thực của da mặt như lỗ chân lông, nếp nhăn tự nhiên, không làm giả mạo hay trông giống nhựa).`
+        : "";
+
+    const lipstickEn = (g === "Nữ" && isLp) 
+        ? `\n7. MAKEUP: Add or enhance lipstick color with ${getColorName(lclr.h, lclr.s)} tone, keeping it professional.`
+        : "";
+    const lipstickVi = (g === "Nữ" && isLp)
+        ? `\nTrang điểm: Son môi màu ${getColorName(lclr.h, lclr.s)} tự nhiên, lịch sự.`
+        : "";
+
+    let resolutionEn = "";
+    let resolutionVi = "";
+    if (currentResolution === "4k") {
+      resolutionEn = "\n8. RESOLUTION: Render in 4K ultra-high definition. Make textures extremely sharp and photorealistic.";
+      resolutionVi = "\nĐộ phân giải: 4K (siêu sắc nét, kết cấu da thật).";
+    } else if (currentResolution === "8k") {
+      resolutionEn = "\n8. RESOLUTION: Render in 8K masterpiece resolution. Maximum detail, pore-level texture, hyper-photorealistic quality.";
+      resolutionVi = "\nĐộ phân giải: 8K (chất lượng cao nhất, cực kỳ sắc nét đến từng lỗ chân lông, siêu thực).";
+    }
+
     let basePrompt = `[SYSTEM INSTRUCTION] This is a professional ID photo replacement task. You must keep the face of the person in the attached image EXACTLY the same. Change ONLY the clothes, the background, and the lighting according to the requirements below.
 
 [REQUIREMENTS]
 1. FACE: Keep 100% of the person's identity, facial structures, eyes, nose, mouth, skin tone, and hair from the reference image.
-2. CLOTHING: Replace current clothes with: ${clothingDesc}, ${styleLabel}. The attire should be professional for a job ID.
+${clothingRequirementEn}
 3. BACKGROUND: Replace current background with: ${bgLabel} (plain, solid color, no gradients, no shadows).
 4. LIGHTING: Use ${lightingDesc}.
-5. STYLE: Professional passport-style headshot, sharp focus, neutral expression.
+5. STYLE: Professional passport-style headshot, sharp focus, neutral expression.${skinSmoothingEn}${lipstickEn}${resolutionEn}
 
 [PROMPT]
 Tạo một ảnh thẻ chân thực dựa trên người trong ảnh tham chiếu. 
 Giữ nguyên khuôn mặt và đặc điểm nhận dạng. 
-Trang phục: ${clothingDesc}, ${styleLabel}, lịch sự. 
+${clothingRequirementVi}
 Phông nền: ${bgLabel}, trơn.
-Ánh sáng: studio, ${lightingOpt.label.toLowerCase()}, cường độ ${li}%.`;
+Ánh sáng: studio, ${lightingOpt.label.toLowerCase()}, cường độ ${li}%.${skinSmoothingVi}${lipstickVi}${resolutionVi}`;
 
     setPrompt(basePrompt);
   };
@@ -346,7 +474,10 @@ Phông nền: ${bgLabel}, trơn.
       setOriginalImage(base64);
       setError(null);
       
-      // Không cần phân tích giới tính nữa, mặc định sử dụng giới tính hiện tại hoặc cho phép người dùng chọn
+      // Create original crops immediately
+      const origCropResults = await createCrops(base64);
+      setOriginalCrops(origCropResults);
+
       updatePrompt(activeTypes, activeStyle, activeBg, typeConfigs, gender);
       setFocusedType("shirt");
       setStep("review-prompt");
@@ -472,6 +603,30 @@ Phông nền: ${bgLabel}, trơn.
     return canvas.toDataURL("image/jpeg", 0.9);
   };
 
+  const compressImage = async (imageUrl: string, maxWidth = 512, quality = 0.7): Promise<string> => {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        const ctx = canvas.getContext("2d")!;
+        let width = img.width;
+        let height = img.height;
+
+        if (width > maxWidth) {
+          height = (maxWidth / width) * height;
+          width = maxWidth;
+        }
+
+        canvas.width = width;
+        canvas.height = height;
+        ctx.drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      };
+      img.src = imageUrl;
+    });
+  };
+
   const downloadImage = (url: string, filename: string) => {
     const link = document.createElement("a");
     link.href = url;
@@ -481,14 +636,18 @@ Phông nền: ${bgLabel}, trơn.
     document.body.removeChild(link);
   };
 
-  const handlePrint = (imageUrl: string) => {
+  const handlePrint = (imageUrl: string, label: string) => {
     const printWindow = window.open('', '_blank');
     if (!printWindow) return;
+
+    const is3x4 = label.includes("3:4") || label.includes("3x4");
+    const photoWidth = is3x4 ? "30mm" : "38mm"; 
+    const photoHeight = is3x4 ? "40mm" : "57.1mm";
 
     printWindow.document.write(`
       <html>
         <head>
-          <title>In Ảnh Thẻ</title>
+          <title>In Ảnh Thẻ - ${label}</title>
           <style>
             @page {
               size: A4;
@@ -497,85 +656,116 @@ Phông nền: ${bgLabel}, trơn.
             body {
               margin: 0;
               padding: 0;
+              background-color: #f8fafc;
               display: flex;
-              flex-direction: column;
-              align-items: center;
-              background-color: white;
+              justify-content: center;
+              font-family: -apple-system, system-ui, sans-serif;
             }
             .a4-container {
               width: 210mm;
               height: 297mm;
-              position: relative;
               background: white;
-              padding-top: 20mm; /* Start point */
-            }
-            .row-container {
-              display: flex;
-              justify-content: center;
-              align-items: flex-start;
               position: relative;
-            }
-            .photo-strip {
+              box-shadow: 0 0 40px rgba(0,0,0,0.1);
+              padding-top: 10mm;
               display: flex;
-              border: 0.1mm solid #ccc; /* Very light border to see boundaries if white bg */
+              flex-direction: column;
+              align-items: center;
             }
-            .photo {
-              width: 38mm;
-              height: 57.1mm;
-              display: block;
+            .photo-grid {
+              display: flex;
+              gap: 0;
+              position: relative;
+              background: #fff;
+            }
+            .photo-item {
+              position: relative;
+              width: ${photoWidth};
+              height: ${photoHeight};
+              border: 0.1pt solid #eee;
+            }
+            .photo-item img {
+              width: 100%;
+              height: 100%;
               object-fit: cover;
+              display: block;
             }
-            /* Alignment / Crop Marks */
-            .guide-lines {
-              position: absolute;
-              pointer-events: none;
-            }
-            /* Vertical lines at start and end */
-            .line-v {
-              position: absolute;
-              top: -10mm;
-              bottom: -10mm;
-              width: 0.1mm;
-              background: #666;
-            }
-            .line-v-start { left: 0; }
-            .line-v-end { right: 0; }
             
-            /* Horizontal lines at top and bottom */
-            .line-h {
+            /* Crop Marks */
+            .crop-mark {
               position: absolute;
-              left: -10mm;
-              right: -10mm;
-              height: 0.1mm;
-              background: #666;
+              width: 4mm;
+              height: 4mm;
+              border: 0.1pt solid #ddd;
+              pointer-events: none;
+              z-index: 10;
             }
-            .line-h-top { top: 0; }
-            .line-h-bottom { bottom: 0; }
+            .mark-tl { top: 0; left: 0; border-right: none; border-bottom: none; }
+            .mark-tr { top: 0; right: 0; border-left: none; border-bottom: none; }
+            .mark-bl { bottom: 0; left: 0; border-right: none; border-top: none; }
+            .mark-br { bottom: 0; right: 0; border-left: none; border-top: none; }
+
+            .controls {
+              position: fixed;
+              bottom: 30px;
+              display: flex;
+              gap: 12px;
+              z-index: 100;
+            }
+            .btn {
+              padding: 10px 20px;
+              border-radius: 8px;
+              cursor: pointer;
+              font-weight: 600;
+              font-size: 14px;
+              transition: all 0.2s;
+              border: none;
+              box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            }
+            .btn-primary { background: #0f172a; color: white; }
+            .btn-secondary { background: white; color: #0f172a; border: 1px solid #e2e8f0; }
+            .btn:hover { transform: translateY(-1px); box-shadow: 0 6px 16px rgba(0,0,0,0.15); }
 
             @media print {
-              .no-print { display: none; }
+              .controls, .no-print { display: none !important; }
               body { background: white; }
+              .a4-container { box-shadow: none; padding: 0; display: block; }
+              .photo-grid { margin: 10mm; }
+              .photo-item { border: none; }
             }
           </style>
         </head>
-        <body onload="window.print(); window.close();">
+        <body>
+          <div class="controls">
+            <button class="btn btn-secondary" onclick="window.close()">Đóng</button>
+            <button class="btn btn-primary" onclick="window.print()">In Ngay</button>
+          </div>
+
           <div class="a4-container">
-            <div class="row-container">
-              <!-- Guides -->
-              <div class="line-h line-h-top"></div>
-              <div class="line-h line-h-bottom"></div>
-              <div class="line-v line-v-start"></div>
-              <div class="line-v line-v-end"></div>
-              
-              <div class="photo-strip">
-                <img src="${imageUrl}" class="photo" />
-                <img src="${imageUrl}" class="photo" />
-                <img src="${imageUrl}" class="photo" />
-                <img src="${imageUrl}" class="photo" />
-                <img src="${imageUrl}" class="photo" />
-              </div>
+            <div class="photo-grid">
+              ${[1,2,3,4,5].map(() => `
+                <div class="photo-item">
+                  <div class="crop-mark mark-tl"></div>
+                  <div class="crop-mark mark-tr"></div>
+                  <div class="crop-mark mark-bl"></div>
+                  <div class="crop-mark mark-br"></div>
+                  <img src="${imageUrl}" onload="window.imageLoaded = (window.imageLoaded || 0) + 1; if(window.imageLoaded == 5) { document.body.classList.add('ready'); }" />
+                </div>
+              `).join('')}
             </div>
           </div>
+
+          <script>
+            // Auto trigger print when images are ready
+            let checkInterval = setInterval(() => {
+              if (window.imageLoaded === 5) {
+                clearInterval(checkInterval);
+                setTimeout(() => {
+                  window.print();
+                }, 1000);
+              }
+            }, 200);
+          </script>
         </body>
       </html>
     `);
@@ -590,6 +780,7 @@ Phông nền: ${bgLabel}, trơn.
     setActiveBg("white");
     setLightingIntensity(75);
     setLightingDirection("front");
+    setPreview2DImage(null);
     setResultImage(null);
     setCrops([]);
     setOriginalCrops([]);
@@ -748,6 +939,96 @@ Phông nền: ${bgLabel}, trơn.
                     </div>
                   </div>
 
+                  <div className="flex flex-col gap-1.5">
+                    <span className="text-[10px] font-bold text-slate-600 uppercase flex justify-between">
+                      Làm mịn da: 
+                      <span className="text-amber-400">{skinSmoothing}%</span>
+                    </span>
+                    <div className="relative h-6 flex items-center group">
+                      <input 
+                        type="range"
+                        min="0"
+                        max="100"
+                        value={skinSmoothing}
+                        onChange={(e) => {
+                          const val = parseInt(e.target.value);
+                          updatePrompt(activeTypes, activeStyle, activeBg, typeConfigs, gender, lightingIntensity, lightingDirection, val);
+                        }}
+                        disabled={step === "upload" || isLoading}
+                        className="w-full h-3 rounded-full appearance-none cursor-pointer outline-none transition-opacity disabled:opacity-30"
+                        style={{
+                          background: `linear-gradient(to right, #1e293b, #fbbf24)`
+                        }}
+                      />
+                      <div className="absolute inset-0 pointer-events-none rounded-full border border-slate-800 ring-2 ring-slate-950" />
+                    </div>
+                  </div>
+
+                  {gender === "Nữ" && (
+                    <div className="grid grid-cols-1 gap-3 p-3 bg-slate-950/50 rounded-xl border border-slate-800/50">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-bold text-slate-600 uppercase">Trang điểm son môi:</span>
+                        <label className="relative inline-flex items-center cursor-pointer">
+                          <input type="checkbox" className="sr-only peer" checked={lipstickEnabled} onChange={(e) => updatePrompt(activeTypes, activeStyle, activeBg, typeConfigs, gender, lightingIntensity, lightingDirection, skinSmoothing, e.target.checked)} disabled={step === "upload" || isLoading} />
+                          <div className="w-9 h-5 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-amber-400"></div>
+                        </label>
+                      </div>
+                      
+                      {lipstickEnabled && (
+                        <div className="flex flex-col gap-3 mt-2">
+                          <div className="flex flex-col gap-1.5">
+                            <span className="text-[10px] font-bold text-slate-600 uppercase flex justify-between">
+                              Màu son: 
+                              <span className="text-amber-400">{getColorName(lipstickColor.h, lipstickColor.s).toUpperCase()}</span>
+                            </span>
+                            <div className="relative h-6 flex items-center group">
+                              <input 
+                                type="range"
+                                min="0"
+                                max="400"
+                                value={lipstickColor.h}
+                                onChange={(e) => {
+                                  const val = parseInt(e.target.value);
+                                  updatePrompt(activeTypes, activeStyle, activeBg, typeConfigs, gender, lightingIntensity, lightingDirection, skinSmoothing, true, { h: val, s: lipstickColor.s });
+                                }}
+                                disabled={step === "upload" || isLoading}
+                                className="w-full h-3 rounded-full appearance-none cursor-pointer outline-none transition-opacity disabled:opacity-30"
+                                style={{
+                                  background: "linear-gradient(to right, #ff0000 0%, #ffff00 22.5%, #00ff00 45%, #00ffff 56%, #0000ff 67.5%, #ff00ff 90%, #ff0000 90%, #ffffff 92.5%, #888888 95%, #444444 97.5%, #000000 100%)"
+                                }}
+                              />
+                              <div className="absolute inset-0 pointer-events-none rounded-full border border-slate-800 ring-2 ring-slate-950" />
+                            </div>
+                          </div>
+                          <div className="flex flex-col gap-1.5">
+                            <span className="text-[10px] font-bold text-slate-600 uppercase flex justify-between">
+                              Cường độ màu: 
+                              <span className="text-amber-400">{lipstickColor.s}%</span>
+                            </span>
+                            <div className="relative h-6 flex items-center group">
+                              <input 
+                                type="range"
+                                min="0"
+                                max="100"
+                                value={lipstickColor.s}
+                                onChange={(e) => {
+                                  const val = parseInt(e.target.value);
+                                  updatePrompt(activeTypes, activeStyle, activeBg, typeConfigs, gender, lightingIntensity, lightingDirection, skinSmoothing, true, { h: lipstickColor.h, s: val });
+                                }}
+                                disabled={step === "upload" || isLoading}
+                                className="w-full h-3 rounded-full appearance-none cursor-pointer outline-none transition-opacity disabled:opacity-30"
+                                style={{
+                                  background: `linear-gradient(to right, #1e293b, #fbbf24)`
+                                }}
+                              />
+                              <div className="absolute inset-0 pointer-events-none rounded-full border border-slate-800 ring-2 ring-slate-950" />
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
                   <div className="grid grid-cols-1 gap-2">
                     <span className="text-[10px] font-bold text-slate-600 uppercase">Loại áo (chọn nhiều - nhấn để chỉnh màu):</span>
                     <div className="flex flex-wrap gap-2">
@@ -763,7 +1044,13 @@ Phông nền: ${bgLabel}, trơn.
                               
                               if (!isActive) {
                                 // Nếu chưa chọn: thêm vào danh sách và đặt focus
-                                nextTypes.push(t.id);
+                                if (t.id === "original") {
+                                  nextTypes = ["original"];
+                                } else {
+                                  nextTypes = nextTypes.filter(id => id !== "original");
+                                  nextTypes.push(t.id);
+                                }
+                                
                                 if (nextConfigs[t.id] === undefined) {
                                   nextConfigs[t.id] = { h: 195, s: 70 }; // Mặc định cho món đồ mới
                                 }
@@ -771,7 +1058,7 @@ Phông nền: ${bgLabel}, trơn.
                               } else {
                                 // Nếu đang isActive:
                                 if (isFocused) {
-                                  // Nếu đang focus rồi: bỏ chọn món này
+                                  // Nếu đang focus rồi: bỏ chọn món này (tuyệt đối không bỏ nếu là món cuối cùng, trừ khi là original)
                                   nextTypes = nextTypes.filter(id => id !== t.id);
                                   if (nextTypes.length === 0) {
                                     nextTypes = ["shirt"];
@@ -802,8 +1089,9 @@ Phông nền: ${bgLabel}, trơn.
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-1 gap-3 p-3 bg-slate-950/50 rounded-xl border border-slate-800/50">
-                    <div className="flex flex-col gap-1.5">
+                  {focusedType !== "original" && (
+                    <div className="grid grid-cols-1 gap-3 p-3 bg-slate-950/50 rounded-xl border border-slate-800/50">
+                      <div className="flex flex-col gap-1.5">
                       <span className="text-[10px] font-bold text-slate-600 uppercase flex justify-between">
                         Tông màu cho {CLOTHING_TYPES.find(t => t.id === focusedType)?.label || "áo"}: 
                         <span className="text-amber-400">{getColorName(typeConfigs[focusedType]?.h ?? 195, typeConfigs[focusedType]?.s ?? 70).toUpperCase()}</span>
@@ -857,7 +1145,9 @@ Phông nền: ${bgLabel}, trơn.
                       </div>
                     </div>
                   </div>
+                  )}
 
+                  {focusedType !== "original" && (
                   <div className="grid grid-cols-1 gap-2">
                     <span className="text-[10px] font-bold text-slate-600 uppercase">Kiểu dáng / Họa tiết:</span>
                     <div className="grid grid-cols-3 gap-2">
@@ -873,6 +1163,7 @@ Phông nền: ${bgLabel}, trơn.
                       ))}
                     </div>
                   </div>
+                  )}
 
                   <div className="grid grid-cols-1 gap-2">
                     <span className="text-[10px] font-bold text-slate-600 uppercase">Màu phông nền:</span>
@@ -929,6 +1220,26 @@ Phông nền: ${bgLabel}, trơn.
                         }}
                       />
                       <div className="absolute inset-0 pointer-events-none rounded-full border border-slate-800 ring-2 ring-slate-950" />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-2">
+                    <span className="text-[10px] font-bold text-slate-600 uppercase">Độ chi tiết (Resolution):</span>
+                    <div className="grid grid-cols-3 gap-2">
+                      {[
+                        { id: "standard", label: "Tiêu chuẩn" },
+                        { id: "4k", label: "4K" },
+                        { id: "8k", label: "8K (Siêu nét)" }
+                      ].map(r => (
+                        <button
+                          key={r.id}
+                          onClick={() => updatePrompt(activeTypes, activeStyle, activeBg, typeConfigs, gender, lightingIntensity, lightingDirection, skinSmoothing, lipstickEnabled, lipstickColor, r.id as any)}
+                          disabled={step === "upload" || isLoading}
+                          className={`flex items-center justify-center py-2 text-[9px] font-bold uppercase rounded-lg border transition-all ${resolution === r.id ? 'bg-amber-400 text-slate-950 border-amber-400 shadow-lg shadow-amber-400/10' : 'bg-slate-950 text-slate-400 border-slate-800 hover:border-slate-600'}`}
+                        >
+                          <span className="truncate">{r.label}</span>
+                        </button>
+                      ))}
                     </div>
                   </div>
                 </div>
@@ -998,6 +1309,85 @@ Phông nền: ${bgLabel}, trơn.
                 </motion.div>
               )}
 
+              {step === "review-prompt" && originalCrops.length > 0 && (
+                <motion.div 
+                  key="review"
+                  initial={{ opacity: 0, scale: 0.98 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0 }}
+                  className="flex flex-col items-center gap-8 w-full max-w-5xl mx-auto"
+                >
+                  <div className="flex flex-col items-center gap-6 group w-full">
+                    <div className="flex gap-4 md:gap-12 items-center justify-center w-full">
+                      {/* 2D Preview (Left) */}
+                      <div className="flex flex-col items-center gap-3">
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] font-bold uppercase tracking-widest text-amber-400">Minh họa 2D</span>
+                          {isCached && <span className="text-[8px] px-1.5 py-0.5 bg-green-500/20 text-green-400 rounded-full border border-green-500/20 uppercase font-black">Sẵn có</span>}
+                          {isPreviewLoading && <Loader2 className="animate-spin text-amber-400" size={12} />}
+                        </div>
+                        <div className={`relative bg-slate-900 rounded-xl p-2 border overflow-hidden transition-all duration-500 ${isPreviewLoading ? 'border-amber-400/50 shadow-[0_0_15px_rgba(251,191,36,0.2)]' : 'border-slate-800'} ${originalCrops[activeCropIdx].ratio === "3:4" ? 'w-[150px] h-[200px] md:w-[225px] md:h-[300px]' : 'w-[140px] h-[210px] md:w-[210px] md:h-[315px]'}`}>
+                          {preview2DImage ? (
+                            <motion.img 
+                              initial={{ opacity: 0 }}
+                              animate={{ opacity: 1 }}
+                              src={preview2DImage} 
+                              className="w-full h-full object-cover rounded-lg" 
+                              alt="2D Preview" 
+                            />
+                          ) : (
+                            <div className="w-full h-full flex flex-col items-center justify-center text-slate-700 bg-slate-950/50 rounded-lg border border-dashed border-slate-800">
+                              <Sparkles size={24} className={isPreviewLoading ? 'animate-pulse text-amber-400' : ''} />
+                              <span className="text-[8px] mt-2 font-mono uppercase">AI Rendering...</span>
+                            </div>
+                          )}
+                          {isPreviewLoading && (
+                            <div className="absolute inset-0 bg-slate-950/20 backdrop-blur-[1px] flex items-center justify-center">
+                              <div className="w-8 h-8 border-2 border-amber-400 border-t-transparent rounded-full animate-spin" />
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="hidden md:flex items-center text-slate-800">
+                        <Zap size={24} className={isPreviewLoading ? 'animate-pulse' : ''} />
+                      </div>
+
+                      {/* Original Cropped (Right) */}
+                      <div className="flex flex-col items-center gap-3">
+                        <span className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Ảnh gốc</span>
+                        <div className={`relative bg-slate-900 rounded-xl p-2 border border-slate-800/50 ${originalCrops[activeCropIdx].ratio === "3:4" ? 'w-[150px] h-[200px] md:w-[225px] md:h-[300px]' : 'w-[140px] h-[210px] md:w-[210px] md:h-[315px]'}`}>
+                          <img 
+                            src={originalCrops[activeCropIdx].url} 
+                            className="w-full h-full object-cover rounded-lg" 
+                            alt="Original Crop" 
+                          />
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-col items-center gap-6 w-full max-w-2xl bg-slate-900/50 p-6 rounded-2xl border border-slate-800">
+                      <div className="text-center space-y-2">
+                        <h3 className="text-sm font-bold text-slate-300 uppercase tracking-widest">Kiểm tra cấu hình</h3>
+                        <p className="text-xs text-slate-500 font-mono italic">Mô hình 2D bên trái minh họa phong cách, màu sắc và ánh sáng bạn đã chọn. Nhấn "CHỈNH SỬA" để bắt đầu quá trình tạo ảnh thật dựa trên khuôn mặt của bạn.</p>
+                      </div>
+                      
+                      <div className="flex items-center gap-2 p-1 bg-slate-950 rounded-lg border border-slate-800">
+                        {originalCrops.map((crop, idx) => (
+                          <button
+                            key={idx}
+                            onClick={() => setActiveCropIdx(idx)}
+                            className={`px-4 py-1.5 rounded-md text-[9px] font-bold uppercase transition-all ${activeCropIdx === idx ? 'bg-amber-400 text-slate-950' : 'text-slate-500 hover:text-slate-400'}`}
+                          >
+                            Tỉ lệ {crop.ratio}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </motion.div>
+              )}
+
               {isLoading && (
                 <motion.div 
                   key="loading"
@@ -1031,8 +1421,13 @@ Phông nền: ${bgLabel}, trơn.
                       {originalCrops.length > 0 && (
                         <div className="flex flex-col items-center gap-2">
                           <span className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Ảnh gốc (đã crop)</span>
-                          <div className={`relative bg-slate-900 rounded-xl p-2 border border-slate-800/50 opacity-60 ${crops[activeCropIdx].ratio === "3:4" ? 'w-[150px] h-[200px] md:w-[225px] md:h-[300px]' : 'w-[140px] h-[210px] md:w-[210px] md:h-[315px]'}`}>
-                            <img src={originalCrops[activeCropIdx].url} className="w-full h-full object-cover rounded-lg" alt="Original Crop" />
+                          <div className={`relative bg-slate-900 rounded-xl p-3 border border-slate-800/50 transition-all`}>
+                            <div className="text-[10px] absolute -top-3 left-4 px-2 py-0.5 bg-slate-800 text-slate-400 font-bold uppercase rounded shadow-sm z-10">
+                              {crops[activeCropIdx].ratio} Ratio
+                            </div>
+                            <div className={`relative bg-slate-900 rounded-lg overflow-hidden flex items-center justify-center ${crops[activeCropIdx].ratio === "3:4" ? 'w-[200px] h-[266px] md:w-[300px] md:h-[400px]' : 'w-[186px] h-[280px] md:w-[280px] md:h-[420px]'}`}>
+                              <img src={originalCrops[activeCropIdx].url} className="w-full h-full object-cover" alt="Original Crop" />
+                            </div>
                           </div>
                         </div>
                       )}
@@ -1083,12 +1478,12 @@ Phông nền: ${bgLabel}, trơn.
                           Tải {crops[activeCropIdx].label}
                         </button>
                         <button 
-                          onClick={() => handlePrint(crops[activeCropIdx].url)}
-                          className="w-1/3 flex items-center justify-center gap-2 py-2.5 bg-slate-800 text-slate-200 hover:bg-slate-700 rounded-xl transition-all font-bold uppercase tracking-wider text-[10px] border border-slate-700 active:scale-95"
-                          title="In 5 ảnh ra tờ A4"
+                          onClick={() => handlePrint(crops[activeCropIdx].url, crops[activeCropIdx].label)}
+                          className="w-1/3 flex flex-col items-center justify-center gap-1 py-2 bg-indigo-600 text-white hover:bg-indigo-500 rounded-xl transition-all shadow-lg shadow-indigo-500/20 active:scale-95 group border border-indigo-400"
+                          title="Sắp xếp 5 ảnh vào khổ A4 để in"
                         >
-                          <Printer size={14} />
-                          In Ảnh
+                          <Printer size={16} className="group-hover:scale-110 transition-transform" />
+                          <span className="font-bold uppercase tracking-wider text-[9px]">In Ảnh Thẻ</span>
                         </button>
                       </div>
                     </div>
@@ -1183,10 +1578,10 @@ Phông nền: ${bgLabel}, trơn.
                     Tải Ảnh Xuống
                   </button>
                   <button 
-                    onClick={() => handlePrint(previewImage.url)}
-                    className="w-1/3 py-3 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold uppercase tracking-wider text-xs rounded-xl transition-all border border-slate-700 flex items-center justify-center gap-3 active:scale-95"
+                    onClick={() => handlePrint(previewImage.url, previewImage.label)}
+                    className="w-1/3 py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-bold uppercase tracking-wider text-xs rounded-xl transition-all shadow-lg shadow-indigo-500/20 flex items-center justify-center gap-3 active:scale-95 border border-indigo-400 group"
                   >
-                    <Printer size={16} />
+                    <Printer size={16} className="group-hover:scale-110 transition-transform" />
                     In Ảnh
                   </button>
                 </div>
